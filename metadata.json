@@ -1,0 +1,6 @@
+{
+  "name": "ENGLISH QR CAMPUS",
+  "description": "Website học tiếng Anh tương tác gồm Trang chủ, Trạm 1 – Word Power, Trạm 2 – Grammar & Structure và bảng xếp hạng thời gian thực với Firebase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

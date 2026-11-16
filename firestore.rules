@@ -1,0 +1,178 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidWeekKey(weekKey) {
+      return weekKey is string && weekKey.size() >= 7 && weekKey.size() <= 10 && weekKey.matches('^[0-9]{4}-W[0-9]{2}$');
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'className', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'className', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.className is string && data.className.size() >= 1 && data.className.size() <= 30
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'className', 'totalScore', 'weeklyScore',
+          'weekKey', 'wordPowerScore', 'grammarScore', 'quizzesCompleted',
+          'isPublic', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'className', 'totalScore', 'weeklyScore',
+          'weekKey', 'wordPowerScore', 'grammarScore', 'quizzesCompleted',
+          'isPublic', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.className is string && data.className.size() >= 1 && data.className.size() <= 30
+        && data.totalScore is int && data.totalScore >= 0 && data.totalScore <= 100000
+        && data.weeklyScore is int && data.weeklyScore >= 0 && data.weeklyScore <= 100000
+        && isValidWeekKey(data.weekKey)
+        && data.wordPowerScore is int && data.wordPowerScore >= 0 && data.wordPowerScore <= 100000
+        && data.grammarScore is int && data.grammarScore >= 0 && data.grammarScore <= 100000
+        && data.quizzesCompleted is int && data.quizzesCompleted >= 0 && data.quizzesCompleted <= 10000
+        && data.isPublic is bool && data.isPublic == true
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidQuizAttempt(data) {
+      return data.keys().hasAll([
+          'uid', 'station', 'topicId', 'score', 'maxScore',
+          'pointsEarned', 'weekKey', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'station', 'topicId', 'score', 'maxScore',
+          'pointsEarned', 'weekKey', 'createdAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.station is string && (data.station == 'word_power' || data.station == 'grammar')
+        && isValidId(data.topicId) && data.topicId.size() <= 64
+        && data.maxScore is int && data.maxScore >= 1 && data.maxScore <= 50
+        && data.score is int && data.score >= 0 && data.score <= data.maxScore
+        && data.pointsEarned is int && data.pointsEarned >= 0 && data.pointsEarned <= 500
+        && isValidWeekKey(data.weekKey)
+        && data.createdAt is timestamp;
+    }
+
+    // 4. Collection Rules
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'className', 'updatedAt']);
+
+      allow delete: if false;
+
+      match /quizAttempts/{attemptId} {
+        allow get: if isValidId(userId) && isValidId(attemptId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.uid == request.auth.uid;
+
+        allow create: if isValidId(userId)
+          && isValidId(attemptId)
+          && isOwner(userId)
+          && isValidQuizAttempt(incoming())
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId))
+          && existsAfter(/databases/$(database)/documents/leaderboard/$(userId));
+
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    match /leaderboard/{userId} {
+      allow get: if isValidId(userId) && resource.data.isPublic == true;
+      allow list: if resource.data.isPublic == true;
+
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().totalScore <= 500
+        && incoming().weeklyScore <= 500
+        && incoming().quizzesCompleted <= 1;
+
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && (
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'className', 'updatedAt'])
+          )
+          ||
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'totalScore', 'weeklyScore', 'weekKey', 'wordPowerScore',
+              'grammarScore', 'quizzesCompleted', 'updatedAt'
+            ])
+            && incoming().totalScore >= existing().totalScore
+            && incoming().totalScore <= existing().totalScore + 500
+            && (
+              (incoming().weekKey == existing().weekKey
+                && incoming().weeklyScore >= existing().weeklyScore
+                && incoming().weeklyScore <= existing().weeklyScore + 500)
+              ||
+              (incoming().weekKey != existing().weekKey
+                && incoming().weeklyScore <= 500)
+            )
+            && incoming().quizzesCompleted == existing().quizzesCompleted + 1
+          )
+        );
+
+      allow delete: if false;
+    }
+  }
+}
